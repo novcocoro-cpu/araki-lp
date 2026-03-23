@@ -1550,13 +1550,38 @@ async function downloadHTML() {
       throw new Error('GitHub push失敗: ' + (putErr.message || putRes.status));
     }
 
-    // 4. Wait for Vercel auto-deploy (polling GitHub commit -> Vercel picks up)
-    st.textContent = 'Vercel自動デプロイ待機中...';
-    await new Promise(r => setTimeout(r, 8000));
-    st.textContent = 'デプロイ反映中...';
-    await new Promise(r => setTimeout(r, 7000));
+    // 4. Poll Vercel deployment until READY (max 90s)
+    const VT = 'vca_8StnrERuDipC8E9fQzeHBNMWLz9bSneJLJdH55vxM3NXQSTpzN1VPIlZ';
+    const TM = 'team_jvSORGXXhQKCsRIJFaP2xfjz';
+    const PJ = 'prj_3SvdWxFsPtN4Vel6M9acH2315aCs';
+    st.textContent = 'Vercelデプロイ検知待ち...';
+    await new Promise(r => setTimeout(r, 5000));
 
-    ov.innerHTML = '<div style="font-size:48px;margin-bottom:8px;">✅</div><div style="font-family:Shippori Mincho,serif;font-size:20px;color:#F0EDE8;">公開完了！</div><div style="font-size:12px;color:#888;margin-top:8px;">GitHubにpush → Vercelに自動反映されました</div><div style="font-size:11px;color:#C9A84C;margin-top:8px;">araki-lp-deploy.vercel.app</div>';
+    let deployed = false;
+    for (let i = 0; i < 17; i++) {
+      try {
+        const dRes = await fetch('https://api.vercel.com/v6/deployments?projectId='+PJ+'&teamId='+TM+'&limit=1&target=production', {
+          headers: {'Authorization': 'Bearer '+VT}
+        });
+        const dData = await dRes.json();
+        const latest = (dData.deployments||[])[0];
+        if (latest) {
+          const age = (Date.now() - latest.createdAt) / 1000;
+          st.textContent = 'デプロイ状態: ' + latest.readyState + ' (' + Math.round(age) + '秒前)';
+          if (latest.readyState === 'READY' && age < 120 && latest.source === 'git') {
+            deployed = true;
+            break;
+          }
+        }
+      } catch(e) { /* polling error, continue */ }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+
+    if (deployed) {
+      ov.innerHTML = '<div style="font-size:48px;margin-bottom:8px;">✅</div><div style="font-family:Shippori Mincho,serif;font-size:20px;color:#F0EDE8;">公開完了！</div><div style="font-size:12px;color:#888;margin-top:8px;">サイトに反映されました</div><div style="font-size:11px;color:#C9A84C;margin-top:8px;">araki-lp-deploy.vercel.app</div>';
+    } else {
+      ov.innerHTML = '<div style="font-size:48px;margin-bottom:8px;">⏳</div><div style="font-family:Shippori Mincho,serif;font-size:20px;color:#F0EDE8;">GitHubにpush済み</div><div style="font-size:12px;color:#888;margin-top:8px;">Vercelが自動デプロイ中です。数分以内に反映されます。</div><div style="font-size:11px;color:#C9A84C;margin-top:8px;">araki-lp-deploy.vercel.app</div>';
+    }
     setTimeout(() => { location.href = location.pathname + '?admin'; }, 3000);
 
   } catch (err) {
