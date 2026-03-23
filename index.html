@@ -1480,10 +1480,12 @@ document.addEventListener('focusin', e => {
 });
 
 async function downloadHTML() {
-  const VT = 'vca_8RyEncGteYHGLjQV3HlGUTa33z3LLMjRj8PaYD3kUD2OP8Lopd38Pi65';
-  const PJ = 'prj_3SvdWxFsPtN4Vel6M9acH2315aCs';
-  const TM = 'team_jvSORGXXhQKCsRIJFaP2xfjz';
+  const GH_REPO = 'novcocoro-cpu/araki-lp';
+  const GH_FILE = 'index.html';
+  const GH_API = 'https://api.github.com/repos/' + GH_REPO + '/contents/' + GH_FILE;
+  let GH_TOKEN = localStorage.getItem('gh_deploy_token') || '';
 
+  // --- Build clean HTML ---
   document.querySelectorAll('[contenteditable]').forEach(el => el.removeAttribute('contenteditable'));
   document.body.classList.remove('edit-active');
   document.body.style.paddingTop = '';
@@ -1504,62 +1506,57 @@ async function downloadHTML() {
   if(bodyEl) bodyEl.style.paddingTop = '';
   const html = '<!DOCTYPE html>\n' + clone.outerHTML;
 
+  // --- Show overlay ---
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(8,8,8,0.95);z-index:999999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;';
   ov.innerHTML = '<div style="font-family:Cormorant Garamond,serif;font-style:italic;font-size:13px;letter-spacing:0.4em;color:#C9A84C;">公開中...</div><div style="width:120px;height:1px;background:rgba(201,168,76,0.2);position:relative;overflow:hidden;"><div style="position:absolute;left:-40%;width:40%;height:100%;background:#C9A84C;animation:loaderSlide 1s ease infinite;"></div></div><div id="pub-status" style="font-size:11px;color:#666;margin-top:8px;"></div>';
   document.body.appendChild(ov);
-  const statusEl = ov.querySelector('#pub-status');
+  const st = ov.querySelector('#pub-status');
+
+  if (!GH_TOKEN) {
+    const input = prompt('GitHub Personal Access Token を入力してください\n（初回のみ。ブラウザに保存されます）');
+    if (!input) { ov.remove(); location.reload(); return; }
+    GH_TOKEN = input.trim();
+    localStorage.setItem('gh_deploy_token', GH_TOKEN);
+  }
 
   try {
-    statusEl.textContent = 'ファイルを準備中...';
-    const enc = new TextEncoder();
-    const htmlBuf = enc.encode(html);
-    async function sha1(buf) {
-      const h = await crypto.subtle.digest('SHA-1', buf);
-      return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('');
-    }
-    const htmlSha = await sha1(htmlBuf);
-
-    statusEl.textContent = 'アップロード中...';
-    const upRes = await fetch('https://api.vercel.com/v2/files?teamId='+TM, {
-      method:'POST',
-      headers:{'Authorization':'Bearer '+VT,'Content-Type':'application/octet-stream','x-vercel-digest':htmlSha,'x-vercel-size':String(htmlBuf.byteLength)},
-      body: htmlBuf
+    // 1. Get current file SHA (required for update)
+    st.textContent = '現在のファイル情報を取得中...';
+    const getRes = await fetch(GH_API, {
+      headers: { 'Authorization': 'token ' + GH_TOKEN, 'Accept': 'application/vnd.github.v3+json' }
     });
-    if (!upRes.ok && upRes.status !== 409) throw new Error('Upload failed: ' + (await upRes.text()));
+    if (!getRes.ok) throw new Error('GitHub読取失敗 (' + getRes.status + ')');
+    const getD = await getRes.json();
+    const currentSha = getD.sha;
 
-    statusEl.textContent = 'デプロイ作成中...';
-    const depRes = await fetch('https://api.vercel.com/v13/deployments?teamId='+TM, {
-      method:'POST',
-      headers:{'Authorization':'Bearer '+VT,'Content-Type':'application/json'},
+    // 2. Base64 encode the HTML
+    st.textContent = 'エンコード中...';
+    const b64 = btoa(unescape(encodeURIComponent(html)));
+
+    // 3. PUT to GitHub Contents API
+    st.textContent = 'GitHubにpush中...';
+    const putRes = await fetch(GH_API, {
+      method: 'PUT',
+      headers: { 'Authorization': 'token ' + GH_TOKEN, 'Content-Type': 'application/json', 'Accept': 'application/vnd.github.v3+json' },
       body: JSON.stringify({
-        name:'araki-lp-deploy', project:PJ, target:'production',
-        files:[{file:'index.html', sha:htmlSha, size:htmlBuf.byteLength}]
+        message: 'Update LP: ' + new Date().toLocaleString('ja-JP'),
+        content: b64,
+        sha: currentSha
       })
     });
-    const depData = await depRes.json();
-    if (!depRes.ok) throw new Error(depData.error?.message || 'Deploy request failed');
-
-    const depId = depData.id;
-    statusEl.textContent = 'ビルド待機中... (ID: ' + depId.slice(0,12) + ')';
-
-    // Poll until READY or ERROR (max 60s)
-    let ready = false;
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 2000));
-      const checkRes = await fetch('https://api.vercel.com/v13/deployments/'+depId+'?teamId='+TM, {
-        headers:{'Authorization':'Bearer '+VT}
-      });
-      const checkData = await checkRes.json();
-      const state = checkData.readyState;
-      statusEl.textContent = '状態: ' + state + ' (' + (i*2+2) + '秒)';
-
-      if (state === 'READY') { ready = true; break; }
-      if (state === 'ERROR') throw new Error('ビルドエラー: ' + (checkData.errorMessage || 'unknown'));
+    if (!putRes.ok) {
+      const putErr = await putRes.json();
+      throw new Error('GitHub push失敗: ' + (putErr.message || putRes.status));
     }
-    if (!ready) throw new Error('タイムアウト: 60秒以内にデプロイ完了しませんでした');
 
-    ov.innerHTML = '<div style="font-size:48px;margin-bottom:8px;">✅</div><div style="font-family:Shippori Mincho,serif;font-size:20px;color:#F0EDE8;">公開完了！</div><div style="font-size:12px;color:#888;margin-top:8px;">サイトに反映されました</div><div style="font-size:11px;color:#C9A84C;margin-top:8px;">araki-lp-deploy.vercel.app</div>';
+    // 4. Wait for Vercel auto-deploy (polling GitHub commit -> Vercel picks up)
+    st.textContent = 'Vercel自動デプロイ待機中...';
+    await new Promise(r => setTimeout(r, 8000));
+    st.textContent = 'デプロイ反映中...';
+    await new Promise(r => setTimeout(r, 7000));
+
+    ov.innerHTML = '<div style="font-size:48px;margin-bottom:8px;">✅</div><div style="font-family:Shippori Mincho,serif;font-size:20px;color:#F0EDE8;">公開完了！</div><div style="font-size:12px;color:#888;margin-top:8px;">GitHubにpush → Vercelに自動反映されました</div><div style="font-size:11px;color:#C9A84C;margin-top:8px;">araki-lp-deploy.vercel.app</div>';
     setTimeout(() => { location.href = location.pathname + '?admin'; }, 3000);
 
   } catch (err) {
